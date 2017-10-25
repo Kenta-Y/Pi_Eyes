@@ -8,7 +8,7 @@ import Adafruit_ADS1x15
 import math
 import pi3d
 import random
-import thread
+import threading
 import time
 import RPi.GPIO as GPIO
 from svg.path import Path, parse_path

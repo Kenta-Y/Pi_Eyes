@@ -6,16 +6,74 @@
 # Snake Eyes Bonnet if you just have it running in autonomous mode.
 # Code is just as in-progress as eyes.py and could use some work.
 
+from __future__ import print_function
+from contextlib import closing
 import Adafruit_ADS1x15
 import math
 import pi3d
 import random
-import thread
+import copy
+import socket
+import netifaces
+import threading
 import time
 import RPi.GPIO as GPIO
 from svg.path import Path, parse_path
 from xml.dom.minidom import parse
 from gfxutil import *
+
+moveTime = 1.0/120.0
+holdTime = 1.0/120.0
+#moveDuration = random.uniform(0.075, 0.175)
+#holdDuration = random.uniform(0.1, 1.1)
+
+# Add socket
+class Socket4UDP:
+  def __init__(self):
+    self.th = None
+    self.yaw = 0
+    self.pitch = 0
+    self.pupilsize = 0.5
+    self.host = netifaces.ifaddresses('wlan0')[netifaces.AF_INET][0]['addr'] # Get my ip-adress
+    self.port = 22222
+    self.bufsize = 32
+    self.writeingFlg = False
+    
+  def socket(self):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    #print(self.host)
+    
+    with closing(sock):
+      sock.bind((self.host, self.port))
+      while True:
+        getStr = sock.recv(self.bufsize) 	# wait buffer
+        if(getStr == b'Close'): 		
+          break
+        getStr = str(getStr).replace("b'","")	
+        getStr = getStr.replace("'","")        
+        atitude = getStr.split(',')		
+        self.yaw 	= int(atitude[0])
+        self.pitch 	= int(atitude[1])
+        self.pupilsize 	= float(atitude[2])
+        print(self.yaw, self.pitch, self.pupilsize)
+      #print('UDP4Socket closeed')
+    return
+
+  def start(self):
+    self.th = threading.Thread(target=self.socket) 
+    self.th.setDaemon(True)
+    self.th.start()
+    #print('UDP4Socket start')
+
+  def close(self):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
+    with closing(sock):
+      sock.connect((self.host, self.port))
+      sock.send(b'Close')
+      #print(sock.recv(self.bufsize))
+    return
+
 
 # INPUT CONFIG for eye motion ----------------------------------------------
 # ANALOG INPUTS REQUIRE SNAKE EYES BONNET
@@ -31,8 +89,7 @@ PUPIL_SMOOTH    = 16    # If > 0, filter input from PUPIL_IN
 PUPIL_MIN       = 0.0   # Lower analog range from PUPIL_IN
 PUPIL_MAX       = 1.0   # Upper "
 BLINK_PIN       = 23    # GPIO pin for blink button
-AUTOBLINK       = True  # If True, eye blinks autonomously
-
+AUTOBLINK       = False  # If True, eye blinks autonomously
 
 # GPIO initialization ------------------------------------------------------
 
@@ -222,6 +279,8 @@ destX        = startX
 destY        = startY
 curX         = startX
 curY         = startY
+#moveDuration = moveTime+0.1
+#holdDuration = holeTime+0.1
 moveDuration = random.uniform(0.075, 0.175)
 holdDuration = random.uniform(0.1, 1.1)
 startTime    = 0.0
@@ -250,10 +309,14 @@ rlRegen = True
 timeOfLastBlink = 0.0
 timeToNextBlink = 1.0
 blinkState      = 0
-blinkDuration   = 0.1
+blinkDuration   = 0
 blinkStartTime  = 0
 
 trackingPos = 0.3
+
+# Socket ------------
+soc = Socket4UDP()
+soc.start()
 
 # Generate one frame of imagery
 def frame(p):
@@ -293,8 +356,8 @@ def frame(p):
 		curY = adcValue[JOYSTICK_Y_IN]
 		if JOYSTICK_X_FLIP: curX = 1.0 - curX
 		if JOYSTICK_Y_FLIP: curY = 1.0 - curY
-		curX = -30.0 + curX * 60.0
-		curY = -30.0 + curY * 60.0
+		curX = -60.0 + curX * 120.0
+		curY = -60.0 + curY * 120.0
 	else :
 		# Autonomous eye position
 		if isMoving == True:
@@ -309,18 +372,22 @@ def frame(p):
 				startY       = destY
 				curX         = destX
 				curY         = destY
-				holdDuration = random.uniform(0.15, 1.7)
+				holdDuration = holdTime
+#				holdDuration = random.uniform(0.1, 1.1)
 				startTime    = now
 				isMoving     = False
 		else:
 			if dt >= holdDuration:
-				destX        = random.uniform(-30.0, 30.0)
-				n            = math.sqrt(900.0 - destX * destX)
-				destY        = random.uniform(-n, n)
+                          	destX        = soc.yaw
+                                destY	     = soc.pitch
+#				destX        = random.uniform(-30.0, 30.0)
+#				n            = math.sqrt(900.0 - destX * destX)
+#				destY        = random.uniform(-n, n)
 				# Movement is slower in this version because
 				# the WorldEye display is big and the eye
 				# should have some 'mass' to it.
-				moveDuration = random.uniform(0.12, 0.35)
+				moveDuration = moveTime
+#                                moveDuration = random.uniform(0.075, 0.175)
 				startTime    = now
 				isMoving     = True
 
@@ -329,11 +396,11 @@ def frame(p):
 	if abs(p - prevPupilScale) >= irisRegenThreshold:
 		# Interpolate points between min and max pupil sizes
 		interPupil = pointsInterp(pupilMinPts, pupilMaxPts, p)
+#          	interPupil = 0.4
 		# Generate mesh between interpolated pupil and iris bounds
 		mesh = pointsMesh(None, interPupil, irisPts, 4, -irisZ, True)
 		iris.re_init(pts=mesh)
 		prevPupilScale = p
-
 	# Eyelid WIP
 
 	if AUTOBLINK and (now - timeOfLastBlink) >= timeToNextBlink:
@@ -428,12 +495,13 @@ def frame(p):
 	eye.rotateToX(curY)
 	eye.rotateToY(curX)
 	eye.draw()
-        upperEyelid.draw()
-        lowerEyelid.draw()
+	upperEyelid.draw()
+	lowerEyelid.draw()
 
 	k = mykeys.read()
 	if k==27:
 		mykeys.close()
+                soc.close()
 		DISPLAY.stop()
 		exit(0)
 
@@ -464,8 +532,7 @@ def split( # Recursive simulated pupil response when no analog sensor
 
 # MAIN LOOP -- runs continuously -------------------------------------------
 
-while True:
-
+while True:        
 	if PUPIL_IN >= 0: # Pupil scale from sensor
 		v = adcValue[PUPIL_IN]
 		if PUPIL_IN_FLIP: v = 1.0 - v
@@ -480,6 +547,8 @@ while True:
 			     PUPIL_SMOOTH)
 		frame(v)
 	else: # Fractal auto pupil scale
-		v = random.random()
-		split(currentPupilScale, v, 4.0, 1.0)
+		#v = random.random()
+          	v = soc.pupilsize
+		split(currentPupilScale, v, 1.0/120.0, 0.0)
 	currentPupilScale = v
+soc.end()
